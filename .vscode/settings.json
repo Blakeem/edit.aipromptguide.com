@@ -1,0 +1,14 @@
+{
+	"css.validate": false,
+	"scss.validate": false,
+	"less.validate": false,
+	"tailwindCSS.includeLanguages": {
+		"svelte": "html"
+	},
+	"editor.quickSuggestions": {
+		"strings": true
+	},
+	"editor.folding": false,
+	"window.zoomLevel": -1,
+	"editor.fontSize": 18
+}

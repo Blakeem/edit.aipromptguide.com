@@ -1,0 +1,77 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Deploy archive (pnpm deploy:pack)
+deploy.tar.gz
+
+# Local development context: vendored framework docs, editor/agent tool state,
+# and host-specific notes (the deployment runbook names this server)
+*.local.md
+/docs/
+/.serena/
+.claude/settings.local.json
+
+# SQLite databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor directories and files
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+/temp/
+
+# Package lock files (if using workspace)
+# Uncomment if you want to ignore lock files
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# Disabled/backup files
+*.disabled
+*.backup
+*.bak
+*.old
+
+# Documentation folder (large files)
+/Documentation/
+aipg/

@@ -1,0 +1,8 @@
+# Package Managers
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+
+# Vendored framework docs, kept verbatim from their upstream sources
+docs/

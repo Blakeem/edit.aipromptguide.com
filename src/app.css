@@ -1,0 +1,74 @@
+:root {
+	--border: 1px solid hsl(210 14% 80% / 40%);
+	--radius: 0.5rem;
+}
+
+body,
+html {
+	height: 100%;
+	margin: 0;
+	font-family: system-ui, sans-serif;
+	color: hsl(210 10% 15%);
+}
+
+#app {
+	height: 100%;
+}
+
+/* Simple 4‑pane layout around the editor */
+.layout {
+	display: grid;
+	grid-template-columns: 300px 1fr 300px;
+	grid-template-rows: 1fr 260px;
+	grid-template-areas:
+		'left  editor right'
+		'bottom bottom bottom';
+	height: 100%;
+	gap: 0.5rem;
+	padding: 0.5rem;
+	box-sizing: border-box;
+}
+
+.left {
+	grid-area: left;
+}
+.right {
+	grid-area: right;
+}
+.bottom {
+	grid-area: bottom;
+}
+.editor {
+	grid-area: editor;
+}
+
+.panel {
+	border: var(--border);
+	border-radius: var(--radius);
+	overflow: auto;
+	padding: 0.75rem;
+	background: hsl(0 0% 100% / 0.6);
+	backdrop-filter: blur(6px);
+}
+
+button.save {
+	position: fixed;
+	bottom: 1rem;
+	right: 1rem;
+	padding: 0.5rem 1rem;
+	border-radius: var(--radius);
+	border: none;
+	background: hsl(210 90% 50%);
+	color: white;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+button.save:active {
+	transform: scale(0.97);
+}
+
+.selected {
+	background: hsl(50 100% 70% / 60%);
+	border-bottom: 2px solid hsl(50 100% 45%);
+}

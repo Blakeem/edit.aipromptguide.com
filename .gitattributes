@@ -1,0 +1,15 @@
+# Normalize every text file to LF in the repo and the working tree, on every machine.
+# This overrides core.autocrlf, so Windows and Linux checkouts (and `git archive`
+# deploy artifacts) all carry identical LF files.
+* text=auto eol=lf
+
+# Binary assets — never touch line endings
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.sqlite binary
+*.db binary
