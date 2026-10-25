@@ -3,7 +3,7 @@
 	import { loadWordSection } from '../word-lookup.js';
 	import type { Pronunciation } from '../word-lookup.js';
 
-	// The API carries one pronunciation per part of speech; the header shows no part of
+	// The API carries one pronunciation per part of speech. The header shows no part of
 	// speech, so identical IPA/variety pairs would otherwise repeat (fox: 4 rows, 2 sounds).
 	function dedupePronunciations(all: Pronunciation[]): Pronunciation[] {
 		// Input collection

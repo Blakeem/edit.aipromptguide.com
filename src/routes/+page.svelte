@@ -108,6 +108,7 @@
 		--text-secondary: #5f6368;
 		--text-tertiary: #9aa0a6;
 		--border: #dadce0;
+		--border-strong: #b4b8be;
 		--accent: #1a73e8;
 		--accent-hover: #1557b0;
 		--accent-bg: #e8f0fe;
@@ -151,6 +152,7 @@
 		--text-secondary: #9aa0a6;
 		--text-tertiary: #5f6368;
 		--border: #5f6368;
+		--border-strong: #757a80;
 		--accent: #8ab4f8;
 		--accent-hover: #aecbfa;
 		--accent-bg: #1e3a8a;

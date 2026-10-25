@@ -2,23 +2,14 @@
 	import { onMount, tick } from 'svelte';
 	import { tabs, activeTabId, createNewTab, closeTab, moveTab, renameTab } from '../stores.js';
 	import type { Tab } from '../stores.js';
+	import { reorderTransform, startReorderDrag } from '../reorder-drag.js';
+	import type { ReorderDrag, ReorderState } from '../reorder-drag.js';
 
-	// Positions are in strip content coordinates (scrollLeft included), so they stay valid
-	// while the strip scrolls under a held tab.
 	interface TabDrag {
 		tabId: string;
 		pointerId: number;
-		element: HTMLElement;
-		fromIndex: number;
-		targetIndex: number;
-		originLeft: number;
-		width: number;
-		grabOffset: number;
-		maxLeft: number;
-		slotShift: number;
-		otherCenters: number[];
-		pointerClientX: number;
-		offsetX: number;
+		controller: ReorderDrag;
+		tabOrder: string;
 	}
 
 	interface TabPress {
@@ -32,8 +23,6 @@
 
 	const LONG_PRESS_MS = 350;
 	const PRESS_MOVE_TOLERANCE_PX = 6;
-	const EDGE_SCROLL_ZONE_PX = 48;
-	const EDGE_SCROLL_MAX_STEP_PX = 14;
 
 	let editingTabId: string | null = null;
 	let editingName = '';
@@ -48,7 +37,7 @@
 	// Tab drag reordering
 	let press: TabPress | null = null;
 	let drag: TabDrag | null = null;
-	let edgeScrollFrame: number | null = null;
+	let dragState: ReorderState | null = null;
 
 	// Overflow exists when the strip can scroll in either direction
 	$: hasOverflow = canScrollLeft || canScrollRight;
@@ -85,6 +74,16 @@
 		tick().then(updateScrollButtons);
 	}
 
+	// A tab opened, closed, or moved mid-drag invalidates the measured slots. A closed tab also
+	// takes its pointer capture with it, so its drag would never receive pointerup.
+	$: dropStaleDrag($tabs);
+
+	const tabOrderOf = (currentTabs: Tab[]) => currentTabs.map((tab) => tab.id).join();
+
+	function dropStaleDrag(currentTabs: Tab[]) {
+		if (drag && tabOrderOf(currentTabs) !== drag.tabOrder) endDrag(false);
+	}
+
 	onMount(() => {
 		updateScrollButtons();
 		resizeObserver = new ResizeObserver(() => updateScrollButtons());
@@ -103,10 +102,6 @@
 
 	function blockTouchPanWhileDragging(event: TouchEvent) {
 		if (drag) event.preventDefault();
-	}
-
-	function toContentX(clientX: number): number {
-		return clientX - tabsContainer.getBoundingClientRect().left + tabsContainer.scrollLeft;
 	}
 
 	function handleTabPointerDown(event: PointerEvent, tab: Tab) {
@@ -140,12 +135,7 @@
 		// Input collection
 		const currentPress = press;
 		const tabElements = Array.from(tabsContainer.querySelectorAll<HTMLElement>('[data-tab-id]'));
-		const gap = parseFloat(getComputedStyle(tabsContainer).columnGap) || 0;
 		let fromIndex = -1;
-		let originLeft = 0;
-		let width = 0;
-		let lastTabRight = 0;
-		const otherCenters: number[] = [];
 
 		// Edge case: the press was cancelled between the timer firing and this call
 		if (!currentPress) return;
@@ -155,85 +145,23 @@
 		fromIndex = tabElements.indexOf(currentPress.element);
 		if (fromIndex === -1) return;
 
-		for (const [index, tabElement] of tabElements.entries()) {
-			const left = toContentX(tabElement.getBoundingClientRect().left);
-
-			if (index === fromIndex) {
-				originLeft = left;
-				width = tabElement.offsetWidth;
-			} else {
-				otherCenters.push(left + tabElement.offsetWidth / 2);
-			}
-			lastTabRight = left + tabElement.offsetWidth;
-		}
-
-		currentPress.element.setPointerCapture(currentPress.pointerId);
-
 		// Output construction
 		drag = {
 			tabId: currentPress.tabId,
 			pointerId: currentPress.pointerId,
-			element: currentPress.element,
-			fromIndex,
-			targetIndex: fromIndex,
-			originLeft,
-			width,
-			grabOffset: toContentX(currentPress.startX) - originLeft,
-			maxLeft: lastTabRight - width,
-			slotShift: width + gap,
-			otherCenters,
-			pointerClientX: currentPress.startX,
-			offsetX: 0
+			controller: startReorderDrag({
+				axis: 'x',
+				container: tabsContainer,
+				items: tabElements,
+				fromIndex,
+				pointerId: currentPress.pointerId,
+				captureElement: currentPress.element,
+				grabClientPosition: currentPress.startX,
+				onChange: (state) => (dragState = state)
+			}),
+			tabOrder: tabOrderOf($tabs)
 		};
 		$activeTabId = currentPress.tabId;
-		edgeScrollFrame = requestAnimationFrame(edgeScrollStep);
-	}
-
-	function updateDragPosition() {
-		// Input collection
-		let pointerLeft = 0;
-		let shownLeft = 0;
-		let center = 0;
-
-		if (!drag) return;
-
-		// Processing: only the drawn tab is clamped to the span the tabs occupy. The slot
-		// uses the unclamped position, since a clamped center can never pass an end tab of
-		// equal width.
-		pointerLeft = toContentX(drag.pointerClientX) - drag.grabOffset;
-		shownLeft = Math.min(Math.max(pointerLeft, 0), drag.maxLeft);
-		center = pointerLeft + drag.width / 2;
-
-		// Output construction
-		drag.offsetX = shownLeft - drag.originLeft;
-		drag.targetIndex = drag.otherCenters.filter((otherCenter) => otherCenter < center).length;
-	}
-
-	// Holding the tab near or past either strip edge scrolls the strip, faster the further out.
-	function edgeScrollStep() {
-		// Input collection
-		const rect = tabsContainer.getBoundingClientRect();
-		let depth = 0;
-
-		if (!drag) return;
-
-		// Processing
-		if (drag.pointerClientX < rect.left + EDGE_SCROLL_ZONE_PX) {
-			depth = drag.pointerClientX - (rect.left + EDGE_SCROLL_ZONE_PX);
-		} else if (drag.pointerClientX > rect.right - EDGE_SCROLL_ZONE_PX) {
-			depth = drag.pointerClientX - (rect.right - EDGE_SCROLL_ZONE_PX);
-		}
-
-		if (depth !== 0) {
-			tabsContainer.scrollLeft +=
-				Math.sign(depth) *
-				EDGE_SCROLL_MAX_STEP_PX *
-				Math.min(1, Math.abs(depth) / EDGE_SCROLL_ZONE_PX);
-			updateDragPosition();
-		}
-
-		// Output construction
-		edgeScrollFrame = requestAnimationFrame(edgeScrollStep);
 	}
 
 	function handleTabPointerMove(event: PointerEvent) {
@@ -248,26 +176,29 @@
 		}
 
 		if (!drag || event.pointerId !== drag.pointerId) return;
-		drag.pointerClientX = event.clientX;
-		updateDragPosition();
+		drag.controller.move(event.clientX);
 	}
 
 	function endDrag(commit: boolean) {
 		// Input collection
 		const finishedDrag = drag;
+		let targetIndex: number | null = null;
 
 		if (!finishedDrag) return;
 
 		// Processing
-		if (edgeScrollFrame !== null) cancelAnimationFrame(edgeScrollFrame);
-		edgeScrollFrame = null;
-		if (finishedDrag.element.hasPointerCapture(finishedDrag.pointerId)) {
-			finishedDrag.element.releasePointerCapture(finishedDrag.pointerId);
-		}
+		targetIndex = finishedDrag.controller.end(commit);
 
 		// Output construction
 		drag = null;
-		if (commit) moveTab(finishedDrag.tabId, finishedDrag.targetIndex);
+		dragState = null;
+		if (targetIndex !== null) moveTab(finishedDrag.tabId, targetIndex);
+	}
+
+	// A mouse released outside the tab sends it no pointerup, so the long press would later
+	// start a drag with no button held. Touch keeps an implicit capture and never leaves early.
+	function handleTabPointerLeave(event: PointerEvent) {
+		if (press && event.pointerId === press.pointerId) cancelPress();
 	}
 
 	function handleTabPointerEnd(event: PointerEvent) {
@@ -275,18 +206,10 @@
 		if (drag && event.pointerId === drag.pointerId) endDrag(event.type === 'pointerup');
 	}
 
-	// The held tab follows the pointer. Tabs between its origin and target slide one slot
-	// toward the origin to open the gap where it will land.
-	function dragTransform(tabId: string, index: number, currentDrag: TabDrag | null): string {
-		if (!currentDrag) return '';
-		if (tabId === currentDrag.tabId) return `translateX(${currentDrag.offsetX}px)`;
-		if (currentDrag.fromIndex < index && index <= currentDrag.targetIndex) {
-			return `translateX(${-currentDrag.slotShift}px)`;
-		}
-		if (currentDrag.targetIndex <= index && index < currentDrag.fromIndex) {
-			return `translateX(${currentDrag.slotShift}px)`;
-		}
-		return '';
+	// lostpointercapture bubbles, and a child's implicit touch capture is lost on purpose when
+	// the drag captures the tab itself.
+	function handleTabLostCapture(event: PointerEvent) {
+		if (event.target === event.currentTarget) handleTabPointerEnd(event);
 	}
 
 	// The native tooltip carries the full name only when CSS cut it off with an ellipsis.
@@ -373,12 +296,14 @@
 				class:active={$activeTabId === tab.id}
 				class:dragging={drag?.tabId === tab.id}
 				data-tab-id={tab.id}
-				style:transform={dragTransform(tab.id, index, drag)}
+				style:transform={reorderTransform(index, dragState)}
 				onclick={() => ($activeTabId = tab.id)}
 				onpointerdown={(event) => handleTabPointerDown(event, tab)}
 				onpointermove={handleTabPointerMove}
 				onpointerup={handleTabPointerEnd}
 				onpointercancel={handleTabPointerEnd}
+				onpointerleave={handleTabPointerLeave}
+				onlostpointercapture={handleTabLostCapture}
 				oncontextmenu={(event) => {
 					if (press || drag) event.preventDefault();
 				}}

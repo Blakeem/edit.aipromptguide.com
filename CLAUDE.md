@@ -4,16 +4,17 @@ A SvelteKit text editor for writing AI prompts, deployed at `edit.aipromptguide.
 
 ### Layout
 
-- `src/routes/+page.svelte` — the single page, holding the tab bar, editor, and collapsible word panel
-- `src/lib/stores.ts` — tabs, theme, panel state, and selection, persisted to localStorage
-- `src/lib/word-lookup.ts` — the only caller of `/api/word`. Selecting a word fetches nothing. Each open sidebar panel loads its own section, race guarded by a module-scope request id
-- `src/lib/word-sections.ts` — section ids and the WordNet relations each section shows, shared by server and client
-- `src/lib/word-section-view.ts` — turns a section payload into the groups a panel renders
-- `src/lib/components/` — TabBar, TextEditor, WordSidebar (stacked collapsible panels), DictionaryPanel, RelationPanel, WordChip, ThemeToggle, AutoSaveStatus
-- `src/lib/server/wordnet.ts` — every SQL statement plus word-form resolution
-- `src/routes/api/word/+server.ts` — thin wrapper over `lookupWord`, the dictionary section
-- `src/routes/api/word/[section]/+server.ts` — thin wrapper over `lookupSection`, one relation section
-- `scripts/fetch-wordnet-db.mjs` — database fetcher, plain Node with no dependencies
+- `src/routes/+page.svelte`: the single page, holding the tab bar, editor, and collapsible word panel
+- `src/lib/stores.ts`: tabs, theme, panel state, and selection, persisted to localStorage
+- `src/lib/word-lookup.ts`: the only caller of `/api/word`. Selecting a word fetches nothing. Each open sidebar panel loads its own section, race guarded by a module-scope request id
+- `src/lib/word-sections.ts`: section ids and the WordNet relations each section shows, shared by server and client
+- `src/lib/word-section-view.ts`: turns a section payload into the groups a panel renders
+- `src/lib/reorder-drag.ts`: pointer drag reordering inside a scroll container, shared by the tab strip and the sidebar cards
+- `src/lib/components/`: TabBar, TextEditor, WordSidebar (section picker plus reorderable, resizable cards), DictionaryPanel, RelationPanel, WordChip, ThemeToggle, AutoSaveStatus
+- `src/lib/server/wordnet.ts`: every SQL statement plus word-form resolution
+- `src/routes/api/word/+server.ts`: thin wrapper over `lookupWord`, the dictionary section
+- `src/routes/api/word/[section]/+server.ts`: thin wrapper over `lookupSection`, one relation section
+- `scripts/fetch-wordnet-db.mjs`: database fetcher, plain Node with no dependencies
 
 ### Word data
 

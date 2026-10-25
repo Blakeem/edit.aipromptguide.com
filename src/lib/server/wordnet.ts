@@ -380,15 +380,6 @@ function getWordVariations(word: string): string[] {
 			// Handle -es endings
 			if (word.endsWith('es')) {
 				variations.push(word.slice(0, -2)); // boxes -> box
-				// Handle -ches, -shes, -xes, -zes
-				if (
-					word.endsWith('ches') ||
-					word.endsWith('shes') ||
-					word.endsWith('xes') ||
-					word.endsWith('zes')
-				) {
-					// Already handled by -es removal
-				}
 				// Handle -oes -> -o (potatoes -> potato)
 				if (word.endsWith('oes')) {
 					variations.push(word.slice(0, -2)); // heroes -> hero

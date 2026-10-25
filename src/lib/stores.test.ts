@@ -254,7 +254,7 @@ describe('moveTab reordering', () => {
 	});
 });
 
-describe('word section accordion', () => {
+describe('word section visibility', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.resetModules();
@@ -267,15 +267,15 @@ describe('word section accordion', () => {
 		delete browserGlobals.CustomEvent;
 	});
 
-	it('drops unknown stored section ids and keeps canonical order', async () => {
+	it('drops unknown and repeated stored section ids and keeps stored order', async () => {
 		installBrowserGlobals({
 			tabs: [makeTab('tab-0', 'A')],
-			openWordSections: ['parts', 'bogus', 'dictionary']
+			openWordSections: ['parts', 'bogus', 'dictionary', 'parts']
 		});
 
 		const stores = await import('./stores');
 
-		expect(get(stores.openWordSections)).toEqual(['dictionary', 'parts']);
+		expect(get(stores.openWordSections)).toEqual(['parts', 'dictionary']);
 	});
 
 	it('collapses the panel when the last open section closes', async () => {
@@ -377,5 +377,66 @@ describe('stored sidebar panels', () => {
 		const stores = await import('./stores');
 
 		expect(get(stores.openWordSections)).toEqual(['dictionary', 'synonyms']);
+	});
+});
+
+describe('sidebar panel order and size', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		delete browserGlobals.window;
+		delete browserGlobals.localStorage;
+		delete browserGlobals.CustomEvent;
+	});
+
+	it('appends a shown panel below the others', async () => {
+		installBrowserGlobals({ tabs: [makeTab('tab-0', 'A')], openWordSections: ['synonyms'] });
+
+		const stores = await import('./stores');
+
+		stores.toggleWordSection('dictionary');
+
+		expect(get(stores.openWordSections)).toEqual(['synonyms', 'dictionary']);
+	});
+
+	it('moves a panel to the given final index', async () => {
+		installBrowserGlobals({
+			tabs: [makeTab('tab-0', 'A')],
+			openWordSections: ['dictionary', 'synonyms', 'similar']
+		});
+
+		const stores = await import('./stores');
+
+		stores.moveWordSection('dictionary', 2);
+
+		expect(get(stores.openWordSections)).toEqual(['synonyms', 'similar', 'dictionary']);
+	});
+
+	it('keeps only valid stored heights and clears one back to content sizing', async () => {
+		installBrowserGlobals({
+			tabs: [makeTab('tab-0', 'A')],
+			wordSectionHeights: { dictionary: 320, synonyms: 'tall', bogus: 200, similar: -5 }
+		});
+
+		const stores = await import('./stores');
+
+		expect(get(stores.wordSectionHeights)).toEqual({ dictionary: 320 });
+
+		stores.setWordSectionHeight('synonyms', 210.6);
+		stores.setWordSectionHeight('dictionary', null);
+
+		expect(get(stores.wordSectionHeights)).toEqual({ synonyms: 211 });
+	});
+
+	it('keeps the section picker closed unless it was stored open', async () => {
+		installBrowserGlobals({ tabs: [makeTab('tab-0', 'A')] });
+
+		const stores = await import('./stores');
+
+		expect(get(stores.sectionPickerOpen)).toBe(false);
 	});
 });

@@ -58,7 +58,7 @@ isDarkMode.subscribe(() => {
 	debouncedSave();
 });
 
-// Word sidebar open/collapsed state (persisted); default open
+// Word sidebar open or collapsed state (persisted), open by default
 export const wordPanelOpen = writable<boolean>(storedState?.wordPanelOpen ?? true);
 
 // Auto-save on word panel toggle
@@ -68,31 +68,36 @@ wordPanelOpen.subscribe(() => {
 
 const DEFAULT_OPEN_WORD_SECTIONS: WordSectionId[] = ['dictionary', 'synonyms'];
 
-// localStorage is user-writable, so unknown ids are dropped instead of trusted. A stored set
-// with no known id falls back to the defaults, since an open sidebar with every panel
-// closed shows nothing.
+// localStorage is user-writable, so unknown and repeated ids are dropped instead of trusted.
+// A stored list with no known id falls back to the defaults, since an open sidebar with no
+// panel shows nothing.
 const loadOpenWordSections = (): WordSectionId[] => {
 	const stored: unknown = storedState?.openWordSections;
-	const known = Array.isArray(stored) ? WORD_SECTION_IDS.filter((id) => stored.includes(id)) : [];
+	const storedIds: unknown[] = Array.isArray(stored) ? stored : [];
+	const known = storedIds.filter(
+		(id, index): id is WordSectionId =>
+			WORD_SECTION_IDS.includes(id as WordSectionId) && storedIds.indexOf(id) === index
+	);
 
 	return known.length > 0 ? known : [...DEFAULT_OPEN_WORD_SECTIONS];
 };
 
-// Sidebar panels that are expanded (persisted)
+// Sidebar panels that are shown, in display order (persisted)
 export const openWordSections = writable<WordSectionId[]>(loadOpenWordSections());
 
 openWordSections.subscribe(() => {
 	debouncedSave();
 });
 
-// Closing the last open panel collapses the sidebar, as the sidebar holds nothing else.
+// A shown panel is appended below the others. Closing the last one collapses the sidebar,
+// as the sidebar holds nothing else.
 export const toggleWordSection = (sectionId: WordSectionId) => {
 	let remainingOpen = 0;
 
 	openWordSections.update((openIds) => {
 		const next = openIds.includes(sectionId)
 			? openIds.filter((id) => id !== sectionId)
-			: WORD_SECTION_IDS.filter((id) => id === sectionId || openIds.includes(id));
+			: [...openIds, sectionId];
 		remainingOpen = next.length;
 		return next;
 	});
@@ -100,7 +105,63 @@ export const toggleWordSection = (sectionId: WordSectionId) => {
 	if (remainingOpen === 0) wordPanelOpen.set(false);
 };
 
-// A sidebar reopened after its last panel closed would show only closed headers.
+// toIndex is the panel's index in the reordered list, after its removal from its old slot.
+export const moveWordSection = (sectionId: WordSectionId, toIndex: number) => {
+	openWordSections.update((openIds) => {
+		const fromIndex = openIds.indexOf(sectionId);
+		const reordered = [...openIds];
+
+		if (fromIndex === -1 || fromIndex === toIndex) return openIds;
+
+		reordered.splice(fromIndex, 1);
+		reordered.splice(toIndex, 0, sectionId);
+		return reordered;
+	});
+};
+
+type WordSectionHeights = Partial<Record<WordSectionId, number>>;
+
+// Only finite positive numbers under known ids survive, since localStorage is user-writable.
+const loadWordSectionHeights = (): WordSectionHeights => {
+	const stored: unknown = storedState?.wordSectionHeights;
+	const heights: WordSectionHeights = {};
+
+	if (typeof stored !== 'object' || stored === null) return heights;
+
+	for (const id of WORD_SECTION_IDS) {
+		const height = (stored as Record<string, unknown>)[id];
+		if (typeof height === 'number' && Number.isFinite(height) && height > 0) heights[id] = height;
+	}
+	return heights;
+};
+
+// Heights the user dragged a panel to, in px (persisted). A panel absent here sizes to its
+// content, up to a share of the sidebar.
+export const wordSectionHeights = writable<WordSectionHeights>(loadWordSectionHeights());
+
+wordSectionHeights.subscribe(() => {
+	debouncedSave();
+});
+
+// null returns the panel to sizing by its content.
+export const setWordSectionHeight = (sectionId: WordSectionId, height: number | null) => {
+	wordSectionHeights.update((heights) => {
+		const next = { ...heights };
+
+		if (height === null) delete next[sectionId];
+		else next[sectionId] = Math.round(height);
+		return next;
+	});
+};
+
+// Whether the chip row that shows and hides panels is expanded (persisted)
+export const sectionPickerOpen = writable<boolean>(storedState?.sectionPickerOpen === true);
+
+sectionPickerOpen.subscribe(() => {
+	debouncedSave();
+});
+
+// A sidebar reopened after its last panel closed would show an empty stack.
 export const expandWordPanel = () => {
 	openWordSections.update((openIds) => (openIds.length > 0 ? openIds : ['dictionary']));
 	wordPanelOpen.set(true);
@@ -230,12 +291,16 @@ export const saveState = () => {
 	let currentIsDarkMode = false;
 	let currentWordPanelOpen = true;
 	let currentOpenWordSections: WordSectionId[] = [];
+	let currentWordSectionHeights: WordSectionHeights = {};
+	let currentSectionPickerOpen = false;
 
 	tabs.subscribe((value) => (currentTabs = value))();
 	activeTabId.subscribe((value) => (currentActiveTabId = value))();
 	isDarkMode.subscribe((value) => (currentIsDarkMode = value))();
 	wordPanelOpen.subscribe((value) => (currentWordPanelOpen = value))();
 	openWordSections.subscribe((value) => (currentOpenWordSections = value))();
+	wordSectionHeights.subscribe((value) => (currentWordSectionHeights = value))();
+	sectionPickerOpen.subscribe((value) => (currentSectionPickerOpen = value))();
 
 	const state = {
 		tabs: currentTabs,
@@ -243,6 +308,8 @@ export const saveState = () => {
 		isDarkMode: currentIsDarkMode,
 		wordPanelOpen: currentWordPanelOpen,
 		openWordSections: currentOpenWordSections,
+		wordSectionHeights: currentWordSectionHeights,
+		sectionPickerOpen: currentSectionPickerOpen,
 		lastSaved: new Date().toISOString()
 	};
 

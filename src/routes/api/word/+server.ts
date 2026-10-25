@@ -1,4 +1,4 @@
-// WordNet API endpoint - returns all data for a given word
+// The dictionary section of a word, fetched only when its sidebar panel is open
 import { json } from '@sveltejs/kit';
 import { lookupWord } from '$lib/server/wordnet';
 import type { RequestHandler } from './$types';
