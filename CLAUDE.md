@@ -6,10 +6,13 @@ A SvelteKit text editor for writing AI prompts, deployed at `edit.aipromptguide.
 
 - `src/routes/+page.svelte` — the single page, holding the tab bar, editor, and collapsible word panel
 - `src/lib/stores.ts` — tabs, theme, panel state, and selection, persisted to localStorage
-- `src/lib/word-lookup.ts` — the only caller of `/api/word`, race guarded by a module-scope request id
-- `src/lib/components/` — TabBar, TextEditor, WordDetails, ThemeToggle, AutoSaveStatus
+- `src/lib/word-lookup.ts` — the only caller of `/api/word`. Selecting a word fetches nothing. Each open sidebar panel loads its own section, race guarded by a module-scope request id
+- `src/lib/word-sections.ts` — section ids and the WordNet relations each section shows, shared by server and client
+- `src/lib/word-section-view.ts` — turns a section payload into the groups a panel renders
+- `src/lib/components/` — TabBar, TextEditor, WordSidebar (stacked collapsible panels), DictionaryPanel, RelationPanel, WordChip, ThemeToggle, AutoSaveStatus
 - `src/lib/server/wordnet.ts` — every SQL statement plus word-form resolution
-- `src/routes/api/word/+server.ts` — thin wrapper over `lookupWord`
+- `src/routes/api/word/+server.ts` — thin wrapper over `lookupWord`, the dictionary section
+- `src/routes/api/word/[section]/+server.ts` — thin wrapper over `lookupSection`, one relation section
 - `scripts/fetch-wordnet-db.mjs` — database fetcher, plain Node with no dependencies
 
 ### Word data
@@ -20,6 +23,7 @@ The prebuilt Open English WordNet 2026 SQLite database (github.com/x-englishword
 - There is NO local import pipeline. To upgrade editions, change `SOURCE_URL` in `scripts/fetch-wordnet-db.mjs`.
 - `wordnet.ts` opens one readonly better-sqlite3 connection lazily on the first lookup, so a missing database surfaces in the API route's 500 `details` instead of crashing at import.
 - Schema gotchas: `senses` has no pos column, so join `synsets`. `sensenum` is per-lexfile and non-unique per (word, pos), so order with the tagcount tiebreaker. `domains.domain` is the short label ('animal') and `domainname` the long one ('noun.animal').
+- Filtering `semrelations` by a constant `relationid` makes SQLite pick the relationid index and scan every hypernym row. `relationIdIs` in `wordnet.ts` prefixes the column with a unary plus to keep the planner on `synset1id`.
 
 ### Checks
 
@@ -28,11 +32,9 @@ The prebuilt Open English WordNet 2026 SQLite database (github.com/x-englishword
 `pnpm lint` runs Prettier then ESLint. Both must stay green.
 
 - `no-useless-assignment` is off in `eslint.config.js`. It fires on variables declared at function start with a default, which is this project's convention, and on Svelte reactive statements whose assignment is read on the next run.
-- Three inline suppressions exist, each with its reason above it. Two are in `TextEditor.svelte` for `svelte/infinite-reactive-loop`, which cannot see the `lastPlacedTabId` guard. One is in `WordDetails.svelte` for `svelte/prefer-svelte-reactivity` over a local `Set` inside a pure function.
+- Three inline suppressions exist, each with its reason above it. Two are in `TextEditor.svelte` for `svelte/infinite-reactive-loop`, which cannot see the `lastPlacedTabId` guard. One is in `DictionaryPanel.svelte` for `svelte/prefer-svelte-reactivity` over a local `Set` inside a pure function.
 
 ### Known debt
-
-`selectedWordData.data` in `stores.ts` is typed `any`. It carries three runtime shapes, a WordNet hit, a miss, or a fetch failure, and `WordDetails.svelte` narrows them across `{#if}` blocks in its template. Typing it as a union requires moving that narrowing into the component script first.
 
 The components are written in Svelte 4 idiom (`$:` statements, `<slot />`) running on Svelte 5. Converting to runes is a separate pass.
 

@@ -1,4 +1,8 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
+
+import type { SectionLookup, WordLookup } from './server/wordnet.js';
+import { WORD_SECTION_IDS } from './word-sections.js';
+import type { RelationSectionId, WordSectionId } from './word-sections.js';
 
 // Tab interface
 export interface Tab {
@@ -54,13 +58,53 @@ isDarkMode.subscribe(() => {
 	debouncedSave();
 });
 
-// Word Explorer panel open/collapsed state (persisted); default open
+// Word sidebar open/collapsed state (persisted); default open
 export const wordPanelOpen = writable<boolean>(storedState?.wordPanelOpen ?? true);
 
 // Auto-save on word panel toggle
 wordPanelOpen.subscribe(() => {
 	debouncedSave();
 });
+
+const DEFAULT_OPEN_WORD_SECTIONS: WordSectionId[] = ['dictionary', 'synonyms'];
+
+// localStorage is user-writable, so unknown ids are dropped instead of trusted. A stored set
+// with no known id falls back to the defaults, since an open sidebar with every panel
+// closed shows nothing.
+const loadOpenWordSections = (): WordSectionId[] => {
+	const stored: unknown = storedState?.openWordSections;
+	const known = Array.isArray(stored) ? WORD_SECTION_IDS.filter((id) => stored.includes(id)) : [];
+
+	return known.length > 0 ? known : [...DEFAULT_OPEN_WORD_SECTIONS];
+};
+
+// Sidebar panels that are expanded (persisted)
+export const openWordSections = writable<WordSectionId[]>(loadOpenWordSections());
+
+openWordSections.subscribe(() => {
+	debouncedSave();
+});
+
+// Closing the last open panel collapses the sidebar, as the sidebar holds nothing else.
+export const toggleWordSection = (sectionId: WordSectionId) => {
+	let remainingOpen = 0;
+
+	openWordSections.update((openIds) => {
+		const next = openIds.includes(sectionId)
+			? openIds.filter((id) => id !== sectionId)
+			: WORD_SECTION_IDS.filter((id) => id === sectionId || openIds.includes(id));
+		remainingOpen = next.length;
+		return next;
+	});
+
+	if (remainingOpen === 0) wordPanelOpen.set(false);
+};
+
+// A sidebar reopened after its last panel closed would show only closed headers.
+export const expandWordPanel = () => {
+	openWordSections.update((openIds) => (openIds.length > 0 ? openIds : ['dictionary']));
+	wordPanelOpen.set(true);
+};
 
 // localStorage is user- and extension-writable, so the persisted tabs may be absent, empty,
 // or not an array at all; every one of those falls back to a single fresh tab.
@@ -108,20 +152,74 @@ export const activeTab = derived(
 	([$tabs, $activeTabId]) => $tabs.find((tab) => tab.id === $activeTabId) || $tabs[0]
 );
 
-// Word data store for the current selection
-export const selectedWordData = writable<{
-	word: string | null;
-	// Carries three runtime shapes: a WordNet hit, a miss, or a fetch failure. WordDetails
-	// narrows them in its template, which a union type here cannot express; tightening this
-	// means moving that narrowing into the component script first.
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	data: any;
-	loading: boolean;
-}>({
-	word: null,
-	data: null,
-	loading: false
-});
+// The word every sidebar panel describes
+export const selectedWord = writable<string | null>(null);
+
+export type SectionLoadState<Result> =
+	{ status: 'loading' } | { status: 'ready'; result: Result } | { status: 'error' };
+
+export type WordSectionStates = { dictionary?: SectionLoadState<WordLookup> } & {
+	[Id in RelationSectionId]?: SectionLoadState<SectionLookup>;
+};
+
+// Load state of each panel's data for the selected word. A panel absent here has not been
+// opened since the word was selected, so nothing was fetched for it.
+export const wordSectionStates = writable<WordSectionStates>({});
+
+// The span of the editor word the panel was opened from. Replacing a word writes into this
+// span, so any typing clears it rather than leaving it pointing at shifted text.
+export interface EditorWordRange {
+	tabId: string;
+	start: number;
+	end: number;
+	word: string;
+}
+
+export const editorWordRange = writable<EditorWordRange | null>(null);
+
+// The span belongs to one tab, so replacing is offered only while that tab is showing.
+export const replaceTarget = derived([editorWordRange, activeTabId], ([$range, $activeTabId]) =>
+	$range && $range.tabId === $activeTabId ? $range.word : null
+);
+
+// Carries the original's capitalization over: 'Big' -> 'Large', 'BIG' -> 'LARGE'.
+export const matchCase = (original: string, replacement: string): string => {
+	const isAllCaps =
+		original.length > 1 &&
+		original === original.toUpperCase() &&
+		original !== original.toLowerCase();
+	const isCapitalized = original[0] !== undefined && original[0] !== original[0].toLowerCase();
+
+	if (isAllCaps) return replacement.toUpperCase();
+	if (isCapitalized) return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+	return replacement;
+};
+
+export const replaceEditorWord = (replacement: string): boolean => {
+	// Input collection
+	const range = get(editorWordRange);
+	const tab = get(tabs).find((candidate) => candidate.id === range?.tabId);
+	let casedReplacement = '';
+
+	// Validation: the span must still hold the word it was recorded with
+	if (!range || !tab || tab.content.slice(range.start, range.end) !== range.word) return false;
+
+	// Processing
+	casedReplacement = matchCase(range.word, replacement);
+	updateTabContent(
+		tab.id,
+		tab.content.slice(0, range.start) + casedReplacement + tab.content.slice(range.end)
+	);
+
+	// Output construction
+	editorWordRange.set({
+		tabId: tab.id,
+		start: range.start,
+		end: range.start + casedReplacement.length,
+		word: casedReplacement
+	});
+	return true;
+};
 
 // Save state to localStorage
 export const saveState = () => {
@@ -131,17 +229,20 @@ export const saveState = () => {
 	let currentActiveTabId = '';
 	let currentIsDarkMode = false;
 	let currentWordPanelOpen = true;
+	let currentOpenWordSections: WordSectionId[] = [];
 
 	tabs.subscribe((value) => (currentTabs = value))();
 	activeTabId.subscribe((value) => (currentActiveTabId = value))();
 	isDarkMode.subscribe((value) => (currentIsDarkMode = value))();
 	wordPanelOpen.subscribe((value) => (currentWordPanelOpen = value))();
+	openWordSections.subscribe((value) => (currentOpenWordSections = value))();
 
 	const state = {
 		tabs: currentTabs,
 		activeTabId: currentActiveTabId,
 		isDarkMode: currentIsDarkMode,
 		wordPanelOpen: currentWordPanelOpen,
+		openWordSections: currentOpenWordSections,
 		lastSaved: new Date().toISOString()
 	};
 
@@ -188,6 +289,20 @@ export const closeTab = (tabId: string) => {
 		}
 
 		return filtered;
+	});
+};
+
+// toIndex is the tab's index in the reordered array, after its removal from fromIndex.
+export const moveTab = (tabId: string, toIndex: number) => {
+	tabs.update((currentTabs) => {
+		const fromIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+		const reordered = [...currentTabs];
+
+		if (fromIndex === -1 || fromIndex === toIndex) return currentTabs;
+
+		const [movedTab] = reordered.splice(fromIndex, 1);
+		reordered.splice(toIndex, 0, movedTab);
+		return reordered;
 	});
 };
 

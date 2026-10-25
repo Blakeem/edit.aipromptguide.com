@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { activeTab, updateTabContent, selectedWordData, wordPanelOpen } from '../stores.js';
+	import { activeTab, editorWordRange, updateTabContent, wordPanelOpen } from '../stores.js';
 	import { selectWord } from '../word-lookup.js';
 
 	let textareaElement: HTMLTextAreaElement;
 	let lastPlacedTabId: string | null = null;
 
 	// Handle word selection
-	async function handleTextClick(event: MouseEvent) {
+	function handleTextClick(event: MouseEvent) {
 		if (!$activeTab) return;
 		// Word definitions are an optional feature: when the panel is collapsed,
 		// never mutate selection state or fetch. Covers click + keyboard nav
@@ -34,9 +34,11 @@
 		// Extract the word
 		const word = $activeTab.content.slice(start, end).trim();
 
-		if (word && word !== $selectedWordData.word) {
-			await selectWord(word);
-		}
+		// Recorded even when the word is already selected, since a second occurrence of it is
+		// a new replacement target.
+		$editorWordRange = word ? { tabId: $activeTab.id, start, end, word } : null;
+
+		if (word) selectWord(word);
 	}
 
 	// Handle keyboard navigation for word selection
@@ -91,6 +93,7 @@
 		if (!$activeTab) return;
 
 		const textarea = event.target as HTMLTextAreaElement;
+		$editorWordRange = null;
 		updateTabContent($activeTab.id, textarea.value);
 	}
 

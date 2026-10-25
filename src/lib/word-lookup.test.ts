@@ -2,11 +2,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
-// Regression tests for the two /api/word contract defects (issues root-p1-3 and
-// root-p1-4): a non-ok response must not read as "word not found", and clearing the
-// selection must invalidate any request still in flight.
+// Regression tests for the /api/word contract: a non-ok response must not read as "word
+// not found", clearing the selection must invalidate any request still in flight, and a
+// panel must fetch only once per selected word.
 
-describe('selectWord error handling', () => {
+describe('loadWordSection error handling', () => {
 	beforeEach(() => {
 		vi.resetModules();
 		vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -28,24 +28,45 @@ describe('selectWord error handling', () => {
 			}))
 		);
 
-		const { selectWord } = await import('./word-lookup');
-		const { selectedWordData } = await import('./stores');
+		const { selectWord, loadWordSection } = await import('./word-lookup');
+		const { wordSectionStates } = await import('./stores');
 
-		await selectWord('cat');
+		selectWord('cat');
+		await loadWordSection('dictionary');
 
-		const state = get(selectedWordData);
-		expect(state.loading).toBe(false);
-		expect(state.data).toEqual({ error: true, message: 'Failed to fetch word data' });
+		expect(get(wordSectionStates).dictionary).toEqual({ status: 'error' });
 	});
 });
 
-describe('clearSelection', () => {
+describe('loadWordSection fetching', () => {
 	beforeEach(() => {
 		vi.resetModules();
 	});
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
+	});
+
+	it('fetches nothing on selection and each section once per word', async () => {
+		const fetchMock = vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			json: async () => ({ found: true, word: 'cat', senses: [] })
+		}));
+		vi.stubGlobal('fetch', fetchMock);
+
+		const { selectWord, loadWordSection } = await import('./word-lookup');
+		const { wordSectionStates } = await import('./stores');
+
+		selectWord('cat');
+		expect(fetchMock).not.toHaveBeenCalled();
+
+		await loadWordSection('synonyms');
+		await loadWordSection('synonyms');
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock).toHaveBeenCalledWith('/api/word/synonyms?word=cat');
+		expect(get(wordSectionStates).synonyms?.status).toBe('ready');
 	});
 
 	it('discards a response that lands after the selection was cleared', async () => {
@@ -62,14 +83,16 @@ describe('clearSelection', () => {
 			})
 		);
 
-		const { selectWord, clearSelection } = await import('./word-lookup');
-		const { selectedWordData } = await import('./stores');
+		const { selectWord, clearSelection, loadWordSection } = await import('./word-lookup');
+		const { selectedWord, wordSectionStates } = await import('./stores');
 
-		const inFlight = selectWord('cat');
+		selectWord('cat');
+		const inFlight = loadWordSection('dictionary');
 		clearSelection();
 		releaseResponse();
 		await inFlight;
 
-		expect(get(selectedWordData)).toEqual({ word: null, data: null, loading: false });
+		expect(get(selectedWord)).toBeNull();
+		expect(get(wordSectionStates)).toEqual({});
 	});
 });

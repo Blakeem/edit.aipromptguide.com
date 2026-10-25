@@ -1,60 +1,88 @@
-// Single owner of /api/word fetches and of the `selectedWordData` transition that goes with
-// them. The request id lives at module scope so a newer selection cancels an older in-flight
-// one no matter which component started it.
-import { selectedWordData } from './stores.js';
-import type { Pronunciation, RelationTarget, WordSense } from './server/wordnet.js';
+// Single owner of /api/word fetches. Selecting a word fetches nothing. Each open sidebar
+// panel requests its own section, so a closed panel costs no query. The request id lives at
+// module scope so a newer selection discards responses for an older one, whichever panel
+// started them.
+import { get } from 'svelte/store';
 
-// Type-only re-export: the payload shape the panel renders, without pulling the server
+import { editorWordRange, selectedWord, wordSectionStates } from './stores.js';
+import type { WordSectionId } from './word-sections.js';
+import type {
+	BroaderRung,
+	Pronunciation,
+	RelationTarget,
+	SectionLookup,
+	SectionSense,
+	WordLookup,
+	WordSense
+} from './server/wordnet.js';
+
+// Type-only re-export: the payload shapes the panels render, without pulling the server
 // module (and its database handle) into client code.
-export type { Pronunciation, RelationTarget, WordSense };
+export type {
+	BroaderRung,
+	Pronunciation,
+	RelationTarget,
+	SectionLookup,
+	SectionSense,
+	WordLookup,
+	WordSense
+};
 
 let latestRequestId = 0;
 
-export async function selectWord(word: string): Promise<void> {
-	// Input collection
-	const requestId = ++latestRequestId;
+export function selectWord(word: string): void {
+	// Reselecting the current word keeps the data already loaded for it.
+	if (word === get(selectedWord)) return;
 
-	// Mark the selection pending before the network round trip.
-	selectedWordData.set({ word, data: null, loading: true });
+	latestRequestId++;
+	wordSectionStates.set({});
+	selectedWord.set(word);
+}
+
+// Bumping the request id is what makes clearing stick: an in-flight response would
+// otherwise pass its guard and repopulate the panels the user just cleared.
+export function clearSelection(): void {
+	latestRequestId++;
+	wordSectionStates.set({});
+	selectedWord.set(null);
+	editorWordRange.set(null);
+}
+
+// Idempotent per selection: a panel calls it whenever it is open, and only the first call
+// for a word fetches. A failed load retries on the next call.
+export async function loadWordSection(sectionId: WordSectionId): Promise<void> {
+	// Input collection
+	const requestId = latestRequestId;
+	const word = get(selectedWord);
+	const currentState = get(wordSectionStates)[sectionId];
+	const endpoint = sectionId === 'dictionary' ? '/api/word' : `/api/word/${sectionId}`;
+
+	// Edge cases: nothing selected, or this section is already loading or loaded
+	if (!word || currentState?.status === 'loading' || currentState?.status === 'ready') return;
+
+	// Processing
+	wordSectionStates.update((states) => ({ ...states, [sectionId]: { status: 'loading' } }));
 
 	try {
-		const response = await fetch(`/api/word?word=${encodeURIComponent(word)}`);
+		const response = await fetch(`${endpoint}?word=${encodeURIComponent(word)}`);
 		if (requestId !== latestRequestId) return;
 
-		// Error bodies carry no `found` field, so they must not fall through to the
-		// not-found branch below — an outage would read as "word not in WordNet".
+		// Error bodies carry no `found` field, so they must not reach the ready state, where
+		// an outage would read as "word not in WordNet".
 		if (!response.ok) {
-			console.error(`Failed to fetch word data: /api/word responded ${response.status}`);
-			selectedWordData.update((current) => ({
-				...current,
-				data: { error: true, message: 'Failed to fetch word data' },
-				loading: false
-			}));
+			console.error(`Failed to fetch ${sectionId}: ${endpoint} responded ${response.status}`);
+			wordSectionStates.update((states) => ({ ...states, [sectionId]: { status: 'error' } }));
 			return;
 		}
 
-		const data = await response.json();
+		const result: WordLookup | SectionLookup = await response.json();
 		if (requestId !== latestRequestId) return;
 
-		selectedWordData.update((current) => ({
-			...current,
-			data: data.found ? data : { found: false, word },
-			loading: false
-		}));
+		// Output construction
+		wordSectionStates.update((states) => ({ ...states, [sectionId]: { status: 'ready', result } }));
 	} catch (error) {
 		if (requestId !== latestRequestId) return;
-		console.error('Failed to fetch word data:', error);
-		selectedWordData.update((current) => ({
-			...current,
-			data: { error: true, message: 'Failed to fetch word data' },
-			loading: false
-		}));
+		console.error(`Failed to fetch ${sectionId}:`, error);
+		wordSectionStates.update((states) => ({ ...states, [sectionId]: { status: 'error' } }));
 	}
-}
-
-// Bumping the request id is what makes clearing stick: an in-flight selectWord() response
-// would otherwise pass its guards and repopulate the panel the user just cleared.
-export function clearSelection(): void {
-	latestRequestId++;
-	selectedWordData.set({ word: null, data: null, loading: false });
 }

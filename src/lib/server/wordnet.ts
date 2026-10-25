@@ -6,6 +6,9 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { env } from '$env/dynamic/private';
 
+import { CLAIMED_RELATIONS, SECTION_RELATIONS } from '../word-sections.js';
+import type { RelationSectionId } from '../word-sections.js';
+
 // 's' is the adjective-satellite posid; the payload collapses it onto 'adjective'.
 const POS_LABELS: Record<string, string> = {
 	n: 'noun',
@@ -16,6 +19,29 @@ const POS_LABELS: Record<string, string> = {
 };
 
 const MAX_RELATION_TARGETS = 20;
+
+// Broad verbs have hundreds of siblings, and naming each one costs a subquery. Twice the
+// display cap leaves room for siblings whose head words repeat.
+const SIMILAR_CANDIDATE_LIMIT = MAX_RELATION_TARGETS * 2;
+
+// Hypernym chains end at 'entity' within 20 steps. The cap only stops a malformed cycle.
+const MAX_BROADER_CHAIN_DEPTH = 30;
+
+// The most frequently tagged member names a synset, with sense order breaking ties.
+const headWordOf = (synsetColumn: string) => `(
+		SELECT COALESCE(hc.casedword, hw.word)
+		FROM senses hs
+		JOIN words hw ON hw.wordid = hs.wordid
+		LEFT JOIN casedwords hc ON hc.casedwordid = hs.casedwordid
+		WHERE hs.synsetid = ${synsetColumn}
+		ORDER BY hs.tagcount IS NULL, hs.tagcount DESC, hs.sensenum, hs.senseid
+		LIMIT 1
+	)`;
+
+// The unary plus keeps SQLite on the synset1id key. Without it the planner picks the
+// relationid index and scans all 88k hypernym or hyponym rows per call.
+const relationIdIs = (column: string, relation: string) =>
+	`+${column} = (SELECT relationid FROM relations WHERE relation = '${relation}')`;
 
 export type ResolvedVia = 'exact' | 'morph' | 'heuristic';
 
@@ -30,6 +56,11 @@ export interface RelationTarget {
 	pos: string;
 }
 
+export interface BroaderRung {
+	word: string;
+	definition: string;
+}
+
 export interface WordSense {
 	sensekey: string | null;
 	pos: string;
@@ -39,10 +70,17 @@ export interface WordSense {
 	definition: string;
 	examples: string[];
 	usages: string[];
+}
+
+// One sense's data for one relation section. Only the fields that section uses are filled.
+export interface SectionSense {
+	display_number: number;
+	pos: string;
+	definition: string;
 	synonyms: string[];
+	similar_words: RelationTarget[];
+	broader_chain: BroaderRung[];
 	relations: Record<string, RelationTarget[]>;
-	ili: string | null;
-	wikidata: string | null;
 }
 
 export interface WordFound {
@@ -55,7 +93,6 @@ export interface WordFound {
 	pronunciations: Pronunciation[];
 	total_senses: number;
 	senses: WordSense[];
-	synonyms: string[];
 	stats: {
 		total_definitions: number;
 		total_examples: number;
@@ -71,6 +108,14 @@ export interface WordNotFound {
 }
 
 export type WordLookup = WordFound | WordNotFound;
+
+export interface SectionFound {
+	word: string;
+	found: true;
+	senses: SectionSense[];
+}
+
+export type SectionLookup = SectionFound | WordNotFound;
 
 interface WordRow {
 	wordid: number;
@@ -102,6 +147,17 @@ interface RelationRow {
 	posid: string;
 }
 
+interface BroaderRungRow {
+	word: string;
+	definition: string;
+}
+
+interface SimilarSynsetRow {
+	synsetid: number;
+	word: string;
+	posid: string;
+}
+
 interface TextRow {
 	text: string;
 }
@@ -110,12 +166,8 @@ interface WordFormRow {
 	word: string;
 }
 
-interface IliRow {
-	ili: string;
-}
-
-interface WikidataRow {
-	wikidata: string;
+interface RelationNameRow {
+	relation: string;
 }
 
 interface WordFormResolution {
@@ -193,7 +245,55 @@ function prepareStatements(db: Database.Database) {
 		JOIN words w ON w.wordid = s.wordid
 		LEFT JOIN casedwords c ON c.casedwordid = s.casedwordid
 		WHERE s.synsetid = ? AND s.wordid <> ?
-		ORDER BY s.sensenum, s.senseid
+		ORDER BY s.tagcount IS NULL, s.tagcount DESC, s.sensenum, s.senseid
+	`),
+
+		// Follows the first hypernym by synsetid at each step, so the 2.7% of synsets with
+		// several hypernyms yield one deterministic chain.
+		broaderChainForSynset: db.prepare<[number], BroaderRungRow>(`
+		WITH RECURSIVE chain(synsetid, depth) AS (
+			SELECT ?, 0
+			UNION ALL
+			SELECT (
+				SELECT sr.synset2id
+				FROM semrelations sr
+				WHERE sr.synset1id = chain.synsetid AND ${relationIdIs('sr.relationid', 'hypernym')}
+				ORDER BY sr.synset2id
+				LIMIT 1
+			), chain.depth + 1
+			FROM chain
+			WHERE chain.synsetid IS NOT NULL AND chain.depth < ${MAX_BROADER_CHAIN_DEPTH}
+		)
+		SELECT ${headWordOf('chain.synsetid')} AS word, sy.definition AS definition
+		FROM chain
+		JOIN synsets sy ON sy.synsetid = chain.synsetid
+		WHERE chain.depth > 0
+		ORDER BY chain.depth
+	`),
+
+		// Co-hyponyms: the other children of this synset's hypernyms, most used first.
+		siblingSynsetsForSynset: db.prepare<[number, number], SimilarSynsetRow>(`
+		SELECT sib.synset2id AS synsetid, ${headWordOf('sib.synset2id')} AS word, sy.posid AS posid
+		FROM semrelations up
+		JOIN semrelations sib
+			ON sib.synset1id = up.synset2id AND ${relationIdIs('sib.relationid', 'hyponym')}
+		JOIN synsets sy ON sy.synsetid = sib.synset2id
+		LEFT JOIN senses s ON s.synsetid = sib.synset2id
+		WHERE up.synset1id = ? AND ${relationIdIs('up.relationid', 'hypernym')}
+			AND sib.synset2id <> ?
+		GROUP BY sib.synset2id
+		ORDER BY SUM(COALESCE(s.tagcount, 0)) DESC, sib.synset2id
+		LIMIT ${SIMILAR_CANDIDATE_LIMIT}
+	`),
+
+		similarSynsetsForSynset: db.prepare<[number], SimilarSynsetRow>(`
+		SELECT sr.synset2id AS synsetid, ${headWordOf('sr.synset2id')} AS word, sy.posid AS posid
+		FROM semrelations sr
+		JOIN synsets sy ON sy.synsetid = sr.synset2id
+		LEFT JOIN senses s ON s.synsetid = sr.synset2id
+		WHERE sr.synset1id = ? AND ${relationIdIs('sr.relationid', 'similar')}
+		GROUP BY sr.synset2id
+		ORDER BY SUM(COALESCE(s.tagcount, 0)) DESC, sr.synset2id
 	`),
 
 		samplesForSynset: db.prepare<[number], TextRow>(
@@ -204,7 +304,10 @@ function prepareStatements(db: Database.Database) {
 			'SELECT usagenote AS text FROM usages WHERE synsetid = ? ORDER BY usageid'
 		),
 
-		semRelationsForSynset: db.prepare<[number], RelationRow>(`
+		relationNames: db.prepare<[], RelationNameRow>('SELECT relation FROM relations'),
+
+		// The second parameter is a JSON array of the relation names to return.
+		semRelationsForSynset: db.prepare<[number, string], RelationRow>(`
 		SELECT r.relation AS relation, COALESCE(c.casedword, w.word) AS word, sy2.posid AS posid
 		FROM semrelations sr
 		JOIN relations r ON r.relationid = sr.relationid
@@ -212,14 +315,14 @@ function prepareStatements(db: Database.Database) {
 		JOIN senses s2 ON s2.synsetid = sr.synset2id
 		JOIN words w ON w.wordid = s2.wordid
 		LEFT JOIN casedwords c ON c.casedwordid = s2.casedwordid
-		WHERE sr.synset1id = ?
+		WHERE sr.synset1id = ? AND r.relation IN (SELECT value FROM json_each(?))
 		ORDER BY r.relation, s2.sensenum, s2.senseid
 	`),
 
 		// Lexical relations (collocation, derivation, antonym, ...) hang off one lexical unit, not
 		// the whole synset. 48 (wordid, synsetid) pairs carry two luids, so scoping by word1id
 		// instead of lu1id would leak one unit's relations onto the other's sense.
-		lexRelationsForSense: db.prepare<[number, number], RelationRow>(`
+		lexRelationsForSense: db.prepare<[number, number, string], RelationRow>(`
 		SELECT r.relation AS relation, COALESCE(c.casedword, w.word) AS word, sy2.posid AS posid
 		FROM lexrelations lr
 		JOIN relations r ON r.relationid = lr.relationid
@@ -227,15 +330,9 @@ function prepareStatements(db: Database.Database) {
 		JOIN senses s2 ON s2.synsetid = lr.synset2id AND s2.luid = lr.lu2id
 		JOIN words w ON w.wordid = s2.wordid
 		LEFT JOIN casedwords c ON c.casedwordid = s2.casedwordid
-		WHERE lr.synset1id = ? AND lr.lu1id = ?
+		WHERE lr.synset1id = ? AND lr.lu1id = ? AND r.relation IN (SELECT value FROM json_each(?))
 		ORDER BY r.relation, s2.sensenum, s2.senseid
-	`),
-
-		iliForSynset: db.prepare<[number], IliRow>('SELECT ili FROM ilis WHERE synsetid = ?'),
-
-		wikidataForSynset: db.prepare<[number], WikidataRow>(
-			'SELECT wikidata FROM wikidatas WHERE synsetid = ? ORDER BY wikidata LIMIT 1'
-		)
+	`)
 	};
 }
 
@@ -248,6 +345,21 @@ function getStatements(): Statements {
 		cachedStatements = prepareStatements(openDatabase());
 	}
 	return cachedStatements;
+}
+
+let cachedOtherRelations: string[] | null = null;
+
+// The other section shows every relation the database holds that no section claims.
+function relationsForSection(sectionId: RelationSectionId): string[] {
+	if (sectionId !== 'other') return SECTION_RELATIONS[sectionId] ?? [];
+
+	if (!cachedOtherRelations) {
+		cachedOtherRelations = getStatements()
+			.relationNames.all()
+			.map((row) => row.relation)
+			.filter((relation) => !CLAIMED_RELATIONS.has(relation));
+	}
+	return cachedOtherRelations;
 }
 
 // Function to generate word form variations
@@ -434,16 +546,53 @@ function groupRelations(rows: RelationRow[]): Record<string, RelationTarget[]> {
 	return grouped;
 }
 
-function buildSense(row: SenseRow, wordid: number): WordSense {
+// Nouns and verbs find peers through a shared hypernym. Adjectives have no hypernyms.
+// WordNet clusters them instead: a head adjective linked by 'similar' to its satellites,
+// so a satellite's peers are its head plus the head's other satellites.
+function buildSimilarWords(synsetid: number, posid: string, ownWord: string): RelationTarget[] {
+	// Input collection
+	const statements = getStatements();
+	const similarWords: RelationTarget[] = [];
+	const seen = new Set<string>([ownWord.toLowerCase()]);
+	let rows: SimilarSynsetRow[] = [];
+	let headAdjective: SimilarSynsetRow | undefined;
+
+	// Processing
+	if (posid === 'a') {
+		rows = statements.similarSynsetsForSynset.all(synsetid);
+	} else if (posid === 's') {
+		rows = statements.similarSynsetsForSynset.all(synsetid);
+		headAdjective = rows.find((row) => row.posid === 'a');
+		if (headAdjective) {
+			rows = [
+				headAdjective,
+				...statements.similarSynsetsForSynset
+					.all(headAdjective.synsetid)
+					.filter((row) => row.synsetid !== synsetid)
+			];
+		}
+	} else {
+		rows = statements.siblingSynsetsForSynset.all(synsetid, synsetid);
+	}
+
+	for (const row of rows) {
+		const key = row.word.toLowerCase();
+
+		if (seen.has(key)) continue;
+		seen.add(key);
+		similarWords.push({ word: row.word, pos: POS_LABELS[row.posid] ?? row.posid });
+		if (similarWords.length >= MAX_RELATION_TARGETS) break;
+	}
+
+	// Output construction
+	return similarWords;
+}
+
+function buildSense(row: SenseRow): WordSense {
 	// Input collection
 	const statements = getStatements();
 	const examples = statements.samplesForSynset.all(row.synsetid);
 	const usages = statements.usagesForSynset.all(row.synsetid);
-	const synonyms = statements.synonymsForSynset.all(row.synsetid, wordid);
-	const semRelations = statements.semRelationsForSynset.all(row.synsetid);
-	const lexRelations = statements.lexRelationsForSense.all(row.synsetid, row.luid);
-	const iliRow = statements.iliForSynset.get(row.synsetid);
-	const wikidataRow = statements.wikidataForSynset.get(row.synsetid);
 
 	// Output construction
 	return {
@@ -454,11 +603,67 @@ function buildSense(row: SenseRow, wordid: number): WordSense {
 		domain: row.domain,
 		definition: row.definition,
 		examples: examples.map((example) => example.text),
-		usages: usages.map((usage) => usage.text),
-		synonyms: dedupe(synonyms.map((synonym) => synonym.word)),
-		relations: groupRelations([...semRelations, ...lexRelations]),
-		ili: iliRow ? iliRow.ili : null,
-		wikidata: wikidataRow ? wikidataRow.wikidata : null
+		usages: usages.map((usage) => usage.text)
+	};
+}
+
+function buildSectionSense(
+	row: SenseRow,
+	displayNumber: number,
+	resolution: WordFormResolution,
+	sectionId: RelationSectionId
+): SectionSense {
+	// Input collection
+	const statements = getStatements();
+	const relationNamesJson = JSON.stringify(relationsForSection(sectionId));
+	const sense: SectionSense = {
+		display_number: displayNumber,
+		pos: POS_LABELS[row.posid] ?? row.posid,
+		definition: row.definition,
+		synonyms: [],
+		similar_words: [],
+		broader_chain: [],
+		relations: {}
+	};
+
+	// Processing: each section runs only its own queries
+	if (sectionId === 'synonyms') {
+		sense.synonyms = dedupe(
+			statements.synonymsForSynset
+				.all(row.synsetid, resolution.wordid)
+				.map((synonym) => synonym.word)
+		);
+	} else if (sectionId === 'similar') {
+		sense.similar_words = buildSimilarWords(row.synsetid, row.posid, resolution.word);
+	} else {
+		sense.relations = groupRelations([
+			...statements.semRelationsForSynset.all(row.synsetid, relationNamesJson),
+			...statements.lexRelationsForSense.all(row.synsetid, row.luid, relationNamesJson)
+		]);
+		if (sectionId === 'broader') {
+			sense.broader_chain = statements.broaderChainForSynset.all(row.synsetid);
+		}
+	}
+
+	// Output construction
+	return sense;
+}
+
+function hasSectionContent(sense: SectionSense): boolean {
+	return (
+		sense.synonyms.length > 0 ||
+		sense.similar_words.length > 0 ||
+		sense.broader_chain.length > 0 ||
+		Object.keys(sense.relations).length > 0
+	);
+}
+
+function notFound(searchedWord: string, variations: string[]): WordNotFound {
+	return {
+		word: searchedWord,
+		found: false,
+		message: 'Word not found in WordNet database',
+		tried_variations: variations
 	};
 }
 
@@ -469,26 +674,17 @@ export function lookupWord(word: string): WordLookup {
 	const resolution = resolveWordForm(searchedWord, variations);
 
 	// Edge case: no form of the word is in the database
-	if (!resolution) {
-		return {
-			word: searchedWord,
-			found: false,
-			message: 'Word not found in WordNet database',
-			tried_variations: variations
-		};
-	}
+	if (!resolution) return notFound(searchedWord, variations);
 
 	// Processing
 	const senseRows = getStatements().sensesForWord.all(resolution.wordid);
-	const senses = senseRows.map((row) => buildSense(row, resolution.wordid));
+	const senses = senseRows.map((row) => buildSense(row));
 	const pronunciations = buildPronunciations(resolution.wordid);
 
-	const synonyms: string[] = [];
 	const posBreakdown: Record<string, number> = {};
 	let totalExamples = 0;
 
 	for (const sense of senses) {
-		synonyms.push(...sense.synonyms);
 		posBreakdown[sense.pos] = (posBreakdown[sense.pos] ?? 0) + 1;
 		totalExamples += sense.examples.length;
 	}
@@ -505,11 +701,31 @@ export function lookupWord(word: string): WordLookup {
 		pronunciations,
 		total_senses: senses.length,
 		senses,
-		synonyms: dedupe(synonyms),
 		stats: {
 			total_definitions: senses.length,
 			total_examples: totalExamples,
 			pos_breakdown: posBreakdown
 		}
 	};
+}
+
+// Senses keep the dictionary's order, so display_number matches the dictionary's numbering.
+// Senses with nothing for the section are left out.
+export function lookupSection(word: string, sectionId: RelationSectionId): SectionLookup {
+	// Input collection
+	const searchedWord = word.toLowerCase().trim();
+	const variations = getWordVariations(searchedWord);
+	const resolution = resolveWordForm(searchedWord, variations);
+
+	// Edge case: no form of the word is in the database
+	if (!resolution) return notFound(searchedWord, variations);
+
+	// Processing
+	const senseRows = getStatements().sensesForWord.all(resolution.wordid);
+	const senses = senseRows
+		.map((row, index) => buildSectionSense(row, index + 1, resolution, sectionId))
+		.filter(hasSectionContent);
+
+	// Output construction
+	return { word: resolution.word, found: true, senses };
 }

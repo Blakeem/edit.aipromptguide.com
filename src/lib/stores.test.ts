@@ -203,3 +203,179 @@ describe('closeTab activation', () => {
 		expect(get(stores.activeTabId)).toBe(remaining[0].id);
 	});
 });
+
+describe('moveTab reordering', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		delete browserGlobals.window;
+		delete browserGlobals.localStorage;
+		delete browserGlobals.CustomEvent;
+	});
+
+	const seedThreeTabs = () =>
+		installBrowserGlobals({
+			tabs: [makeTab('tab-0', 'A'), makeTab('tab-1', 'B'), makeTab('tab-2', 'C')],
+			activeTabId: 'tab-0',
+			isDarkMode: false
+		});
+
+	it('moves a tab rightward to the given final index', async () => {
+		seedThreeTabs();
+		const stores = await import('./stores');
+
+		stores.moveTab('tab-0', 2);
+
+		expect(get(stores.tabs).map((tab) => tab.id)).toEqual(['tab-1', 'tab-2', 'tab-0']);
+	});
+
+	it('moves a tab leftward to the given final index', async () => {
+		seedThreeTabs();
+		const stores = await import('./stores');
+
+		stores.moveTab('tab-2', 0);
+
+		expect(get(stores.tabs).map((tab) => tab.id)).toEqual(['tab-2', 'tab-0', 'tab-1']);
+	});
+
+	it('keeps the same array when the index is unchanged or the id is unknown', async () => {
+		seedThreeTabs();
+		const stores = await import('./stores');
+		const before = get(stores.tabs);
+
+		stores.moveTab('tab-1', 1);
+		stores.moveTab('tab-missing', 0);
+
+		expect(get(stores.tabs)).toBe(before);
+	});
+});
+
+describe('word section accordion', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		delete browserGlobals.window;
+		delete browserGlobals.localStorage;
+		delete browserGlobals.CustomEvent;
+	});
+
+	it('drops unknown stored section ids and keeps canonical order', async () => {
+		installBrowserGlobals({
+			tabs: [makeTab('tab-0', 'A')],
+			openWordSections: ['parts', 'bogus', 'dictionary']
+		});
+
+		const stores = await import('./stores');
+
+		expect(get(stores.openWordSections)).toEqual(['dictionary', 'parts']);
+	});
+
+	it('collapses the panel when the last open section closes', async () => {
+		installBrowserGlobals({ tabs: [makeTab('tab-0', 'A')], openWordSections: ['synonyms'] });
+
+		const stores = await import('./stores');
+
+		stores.toggleWordSection('synonyms');
+
+		expect(get(stores.openWordSections)).toEqual([]);
+		expect(get(stores.wordPanelOpen)).toBe(false);
+	});
+
+	it('reopens the sidebar with the dictionary when no panel was left open', async () => {
+		installBrowserGlobals({ tabs: [makeTab('tab-0', 'A')], openWordSections: ['synonyms'] });
+
+		const stores = await import('./stores');
+
+		stores.toggleWordSection('synonyms');
+		stores.expandWordPanel();
+
+		expect(get(stores.openWordSections)).toEqual(['dictionary']);
+		expect(get(stores.wordPanelOpen)).toBe(true);
+	});
+});
+
+describe('replaceEditorWord', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		delete browserGlobals.window;
+		delete browserGlobals.localStorage;
+		delete browserGlobals.CustomEvent;
+	});
+
+	const seedText = (content: string) =>
+		installBrowserGlobals({
+			tabs: [{ ...makeTab('tab-0', 'A'), content }],
+			activeTabId: 'tab-0'
+		});
+
+	it('carries capitalization and all caps over to the replacement', async () => {
+		seedText('');
+		const { matchCase } = await import('./stores');
+
+		expect(matchCase('big', 'large')).toBe('large');
+		expect(matchCase('Big', 'large')).toBe('Large');
+		expect(matchCase('BIG', 'large')).toBe('LARGE');
+		expect(matchCase('A', 'one')).toBe('One');
+	});
+
+	it('replaces the recorded span and moves the span onto the replacement', async () => {
+		seedText('A Big dog barks.');
+		const stores = await import('./stores');
+
+		stores.editorWordRange.set({ tabId: 'tab-0', start: 2, end: 5, word: 'Big' });
+
+		expect(stores.replaceEditorWord('large')).toBe(true);
+		expect(get(stores.tabs)[0].content).toBe('A Large dog barks.');
+		expect(get(stores.editorWordRange)).toEqual({
+			tabId: 'tab-0',
+			start: 2,
+			end: 7,
+			word: 'Large'
+		});
+	});
+
+	it('refuses when the span no longer holds the recorded word', async () => {
+		seedText('A small dog barks.');
+		const stores = await import('./stores');
+
+		stores.editorWordRange.set({ tabId: 'tab-0', start: 2, end: 5, word: 'Big' });
+
+		expect(stores.replaceEditorWord('large')).toBe(false);
+		expect(get(stores.tabs)[0].content).toBe('A small dog barks.');
+	});
+});
+
+describe('stored sidebar panels', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		delete browserGlobals.window;
+		delete browserGlobals.localStorage;
+		delete browserGlobals.CustomEvent;
+	});
+
+	it('falls back to the default panels when no stored id is known', async () => {
+		installBrowserGlobals({ tabs: [makeTab('tab-0', 'A')], openWordSections: ['meanings'] });
+
+		const stores = await import('./stores');
+
+		expect(get(stores.openWordSections)).toEqual(['dictionary', 'synonyms']);
+	});
+});

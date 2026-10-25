@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { isDarkMode, saveState, wordPanelOpen } from '../lib/stores.js';
+	import { expandWordPanel, isDarkMode, saveState, wordPanelOpen } from '../lib/stores.js';
 	import TabBar from '../lib/components/TabBar.svelte';
 	import ThemeToggle from '../lib/components/ThemeToggle.svelte';
 	import TextEditor from '../lib/components/TextEditor.svelte';
-	import WordDetails from '../lib/components/WordDetails.svelte';
+	import WordSidebar from '../lib/components/WordSidebar.svelte';
 	import AutoSaveStatus from '../lib/components/AutoSaveStatus.svelte';
 
 	// Auto-save interval
@@ -69,40 +69,13 @@
 
 		<div class="sidebar-section">
 			{#if $wordPanelOpen}
-				<div class="sidebar-panel">
-					<div class="panel-header">
-						<span class="panel-icon">📖</span>
-						<span class="panel-title">Word Explorer</span>
-						<button
-							class="collapse-btn"
-							onclick={() => wordPanelOpen.set(false)}
-							title="Collapse Word Explorer"
-							aria-label="Collapse Word Explorer"
-						>
-							<svg
-								width="16"
-								height="16"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<polyline points="9 18 15 12 9 6" />
-							</svg>
-						</button>
-					</div>
-					<div class="panel-content">
-						<WordDetails />
-					</div>
-				</div>
+				<WordSidebar />
 			{:else}
 				<button
 					class="sidebar-rail"
-					onclick={() => wordPanelOpen.set(true)}
-					title="Expand Word Explorer"
-					aria-label="Expand Word Explorer"
+					onclick={expandWordPanel}
+					title="Expand sidebar"
+					aria-label="Expand sidebar"
 				>
 					<svg
 						width="16"
@@ -239,56 +212,6 @@
 		min-height: 0;
 	}
 
-	.sidebar-panel {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		background: var(--bg-primary);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		overflow: hidden;
-	}
-
-	.panel-header {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.75rem 1rem;
-		background: var(--bg-secondary);
-		border-bottom: 1px solid var(--border);
-	}
-
-	.panel-icon {
-		font-size: 1rem;
-	}
-
-	.panel-title {
-		font-weight: 600;
-		font-size: 0.9rem;
-		color: var(--text-primary);
-	}
-
-	.collapse-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		margin-left: auto;
-		width: 28px;
-		height: 28px;
-		border: 1px solid var(--border);
-		background: var(--bg-primary);
-		color: var(--text-secondary);
-		border-radius: 6px;
-		cursor: pointer;
-		transition: all 0.2s ease;
-	}
-
-	.collapse-btn:hover {
-		background: var(--bg-hover);
-		color: var(--accent);
-		border-color: var(--accent);
-	}
-
 	/* Slim collapsed rail with a clear expand affordance */
 	.sidebar-rail {
 		display: flex;
@@ -315,26 +238,6 @@
 	.rail-icon {
 		font-size: 1.1rem;
 		line-height: 1;
-	}
-
-	.panel-content {
-		flex: 1;
-		overflow-y: auto;
-		scrollbar-width: thin;
-		scrollbar-color: var(--border) transparent;
-	}
-
-	.panel-content::-webkit-scrollbar {
-		width: 8px;
-	}
-
-	.panel-content::-webkit-scrollbar-track {
-		background: transparent;
-	}
-
-	.panel-content::-webkit-scrollbar-thumb {
-		background: var(--border);
-		border-radius: 4px;
 	}
 
 	@media (max-width: 1200px) {

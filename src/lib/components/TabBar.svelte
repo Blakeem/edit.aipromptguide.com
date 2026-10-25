@@ -1,7 +1,39 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { tabs, activeTabId, createNewTab, closeTab, renameTab } from '../stores.js';
+	import { tabs, activeTabId, createNewTab, closeTab, moveTab, renameTab } from '../stores.js';
 	import type { Tab } from '../stores.js';
+
+	// Positions are in strip content coordinates (scrollLeft included), so they stay valid
+	// while the strip scrolls under a held tab.
+	interface TabDrag {
+		tabId: string;
+		pointerId: number;
+		element: HTMLElement;
+		fromIndex: number;
+		targetIndex: number;
+		originLeft: number;
+		width: number;
+		grabOffset: number;
+		maxLeft: number;
+		slotShift: number;
+		otherCenters: number[];
+		pointerClientX: number;
+		offsetX: number;
+	}
+
+	interface TabPress {
+		tabId: string;
+		pointerId: number;
+		element: HTMLElement;
+		startX: number;
+		startY: number;
+		timer: ReturnType<typeof setTimeout>;
+	}
+
+	const LONG_PRESS_MS = 350;
+	const PRESS_MOVE_TOLERANCE_PX = 6;
+	const EDGE_SCROLL_ZONE_PX = 48;
+	const EDGE_SCROLL_MAX_STEP_PX = 14;
 
 	let editingTabId: string | null = null;
 	let editingName = '';
@@ -12,6 +44,11 @@
 	let canScrollLeft = false;
 	let canScrollRight = false;
 	let resizeObserver: ResizeObserver | null = null;
+
+	// Tab drag reordering
+	let press: TabPress | null = null;
+	let drag: TabDrag | null = null;
+	let edgeScrollFrame: number | null = null;
 
 	// Overflow exists when the strip can scroll in either direction
 	$: hasOverflow = canScrollLeft || canScrollRight;
@@ -52,11 +89,210 @@
 		updateScrollButtons();
 		resizeObserver = new ResizeObserver(() => updateScrollButtons());
 		resizeObserver.observe(tabsContainer);
+		// Svelte registers ontouchmove as passive, and only a non-passive listener can stop
+		// a touch drag from panning the strip.
+		tabsContainer.addEventListener('touchmove', blockTouchPanWhileDragging, { passive: false });
 		return () => {
 			resizeObserver?.disconnect();
 			resizeObserver = null;
+			tabsContainer.removeEventListener('touchmove', blockTouchPanWhileDragging);
+			cancelPress();
+			endDrag(false);
 		};
 	});
+
+	function blockTouchPanWhileDragging(event: TouchEvent) {
+		if (drag) event.preventDefault();
+	}
+
+	function toContentX(clientX: number): number {
+		return clientX - tabsContainer.getBoundingClientRect().left + tabsContainer.scrollLeft;
+	}
+
+	function handleTabPointerDown(event: PointerEvent, tab: Tab) {
+		// Input collection
+		const element = event.currentTarget as HTMLElement;
+		const onCloseButton = (event.target as HTMLElement).closest('.close-btn') !== null;
+
+		// Edge cases: secondary buttons, the close button, and the rename input keep their
+		// own behavior
+		if (event.button !== 0 || onCloseButton || editingTabId === tab.id || drag) return;
+
+		// Processing
+		cancelPress();
+		press = {
+			tabId: tab.id,
+			pointerId: event.pointerId,
+			element,
+			startX: event.clientX,
+			startY: event.clientY,
+			timer: setTimeout(beginDrag, LONG_PRESS_MS)
+		};
+	}
+
+	function cancelPress() {
+		if (!press) return;
+		clearTimeout(press.timer);
+		press = null;
+	}
+
+	function beginDrag() {
+		// Input collection
+		const currentPress = press;
+		const tabElements = Array.from(tabsContainer.querySelectorAll<HTMLElement>('[data-tab-id]'));
+		const gap = parseFloat(getComputedStyle(tabsContainer).columnGap) || 0;
+		let fromIndex = -1;
+		let originLeft = 0;
+		let width = 0;
+		let lastTabRight = 0;
+		const otherCenters: number[] = [];
+
+		// Edge case: the press was cancelled between the timer firing and this call
+		if (!currentPress) return;
+		press = null;
+
+		// Processing
+		fromIndex = tabElements.indexOf(currentPress.element);
+		if (fromIndex === -1) return;
+
+		for (const [index, tabElement] of tabElements.entries()) {
+			const left = toContentX(tabElement.getBoundingClientRect().left);
+
+			if (index === fromIndex) {
+				originLeft = left;
+				width = tabElement.offsetWidth;
+			} else {
+				otherCenters.push(left + tabElement.offsetWidth / 2);
+			}
+			lastTabRight = left + tabElement.offsetWidth;
+		}
+
+		currentPress.element.setPointerCapture(currentPress.pointerId);
+
+		// Output construction
+		drag = {
+			tabId: currentPress.tabId,
+			pointerId: currentPress.pointerId,
+			element: currentPress.element,
+			fromIndex,
+			targetIndex: fromIndex,
+			originLeft,
+			width,
+			grabOffset: toContentX(currentPress.startX) - originLeft,
+			maxLeft: lastTabRight - width,
+			slotShift: width + gap,
+			otherCenters,
+			pointerClientX: currentPress.startX,
+			offsetX: 0
+		};
+		$activeTabId = currentPress.tabId;
+		edgeScrollFrame = requestAnimationFrame(edgeScrollStep);
+	}
+
+	function updateDragPosition() {
+		// Input collection
+		let pointerLeft = 0;
+		let shownLeft = 0;
+		let center = 0;
+
+		if (!drag) return;
+
+		// Processing: only the drawn tab is clamped to the span the tabs occupy. The slot
+		// uses the unclamped position, since a clamped center can never pass an end tab of
+		// equal width.
+		pointerLeft = toContentX(drag.pointerClientX) - drag.grabOffset;
+		shownLeft = Math.min(Math.max(pointerLeft, 0), drag.maxLeft);
+		center = pointerLeft + drag.width / 2;
+
+		// Output construction
+		drag.offsetX = shownLeft - drag.originLeft;
+		drag.targetIndex = drag.otherCenters.filter((otherCenter) => otherCenter < center).length;
+	}
+
+	// Holding the tab near or past either strip edge scrolls the strip, faster the further out.
+	function edgeScrollStep() {
+		// Input collection
+		const rect = tabsContainer.getBoundingClientRect();
+		let depth = 0;
+
+		if (!drag) return;
+
+		// Processing
+		if (drag.pointerClientX < rect.left + EDGE_SCROLL_ZONE_PX) {
+			depth = drag.pointerClientX - (rect.left + EDGE_SCROLL_ZONE_PX);
+		} else if (drag.pointerClientX > rect.right - EDGE_SCROLL_ZONE_PX) {
+			depth = drag.pointerClientX - (rect.right - EDGE_SCROLL_ZONE_PX);
+		}
+
+		if (depth !== 0) {
+			tabsContainer.scrollLeft +=
+				Math.sign(depth) *
+				EDGE_SCROLL_MAX_STEP_PX *
+				Math.min(1, Math.abs(depth) / EDGE_SCROLL_ZONE_PX);
+			updateDragPosition();
+		}
+
+		// Output construction
+		edgeScrollFrame = requestAnimationFrame(edgeScrollStep);
+	}
+
+	function handleTabPointerMove(event: PointerEvent) {
+		// Input collection
+		let distance = 0;
+
+		// Processing: a press that moves before the long press fires is a click or a pan
+		if (press && event.pointerId === press.pointerId) {
+			distance = Math.hypot(event.clientX - press.startX, event.clientY - press.startY);
+			if (distance > PRESS_MOVE_TOLERANCE_PX) cancelPress();
+			return;
+		}
+
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		drag.pointerClientX = event.clientX;
+		updateDragPosition();
+	}
+
+	function endDrag(commit: boolean) {
+		// Input collection
+		const finishedDrag = drag;
+
+		if (!finishedDrag) return;
+
+		// Processing
+		if (edgeScrollFrame !== null) cancelAnimationFrame(edgeScrollFrame);
+		edgeScrollFrame = null;
+		if (finishedDrag.element.hasPointerCapture(finishedDrag.pointerId)) {
+			finishedDrag.element.releasePointerCapture(finishedDrag.pointerId);
+		}
+
+		// Output construction
+		drag = null;
+		if (commit) moveTab(finishedDrag.tabId, finishedDrag.targetIndex);
+	}
+
+	function handleTabPointerEnd(event: PointerEvent) {
+		cancelPress();
+		if (drag && event.pointerId === drag.pointerId) endDrag(event.type === 'pointerup');
+	}
+
+	// The held tab follows the pointer. Tabs between its origin and target slide one slot
+	// toward the origin to open the gap where it will land.
+	function dragTransform(tabId: string, index: number, currentDrag: TabDrag | null): string {
+		if (!currentDrag) return '';
+		if (tabId === currentDrag.tabId) return `translateX(${currentDrag.offsetX}px)`;
+		if (currentDrag.fromIndex < index && index <= currentDrag.targetIndex) {
+			return `translateX(${-currentDrag.slotShift}px)`;
+		}
+		if (currentDrag.targetIndex <= index && index < currentDrag.fromIndex) {
+			return `translateX(${currentDrag.slotShift}px)`;
+		}
+		return '';
+	}
+
+	// The native tooltip carries the full name only when CSS cut it off with an ellipsis.
+	function showFullNameIfTruncated(element: HTMLElement, name: string) {
+		element.title = element.scrollWidth > element.clientWidth ? name : '';
+	}
 
 	function startEditing(tab: Tab) {
 		editingTabId = tab.id;
@@ -125,12 +361,27 @@
 			</svg>
 		</button>
 	{/if}
-	<div class="tabs-container" bind:this={tabsContainer} onscroll={updateScrollButtons}>
-		{#each $tabs as tab (tab.id)}
+	<div
+		class="tabs-container"
+		class:dragging={drag !== null}
+		bind:this={tabsContainer}
+		onscroll={updateScrollButtons}
+	>
+		{#each $tabs as tab, index (tab.id)}
 			<div
 				class="tab"
 				class:active={$activeTabId === tab.id}
+				class:dragging={drag?.tabId === tab.id}
+				data-tab-id={tab.id}
+				style:transform={dragTransform(tab.id, index, drag)}
 				onclick={() => ($activeTabId = tab.id)}
+				onpointerdown={(event) => handleTabPointerDown(event, tab)}
+				onpointermove={handleTabPointerMove}
+				onpointerup={handleTabPointerEnd}
+				onpointercancel={handleTabPointerEnd}
+				oncontextmenu={(event) => {
+					if (press || drag) event.preventDefault();
+				}}
 			>
 				{#if editingTabId === tab.id}
 					<input
@@ -145,7 +396,7 @@
 					<span
 						class="tab-name"
 						ondblclick={() => startEditing(tab)}
-						title="Double-click to rename"
+						onmouseenter={(event) => showFullNameIfTruncated(event.currentTarget, tab.name)}
 					>
 						{tab.name}
 					</span>
@@ -237,7 +488,21 @@
 		min-width: 120px;
 		max-width: 200px;
 		position: relative;
-		transition: all 0.2s ease;
+		user-select: none;
+		touch-action: pan-x;
+		transition:
+			background 0.2s ease,
+			border-color 0.2s ease;
+	}
+
+	/* Only the tabs sliding aside animate. The held tab tracks the pointer, and the drop
+	   must snap because the reorder and the transform reset land in the same frame. */
+	.tabs-container.dragging .tab:not(.dragging) {
+		transition: transform 0.15s ease;
+	}
+
+	.tabs-container.dragging {
+		cursor: grabbing;
 	}
 
 	.tab:hover {
@@ -252,8 +517,17 @@
 		z-index: 1;
 	}
 
+	/* Follows .tab.active because the held tab is always the active tab. */
+	.tab.dragging {
+		z-index: 2;
+		cursor: grabbing;
+		background: var(--accent-bg);
+		border-color: var(--accent);
+	}
+
 	.tab-name {
 		flex: 1;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		color: var(--text-primary);
@@ -262,6 +536,8 @@
 
 	.tab-name-input {
 		flex: 1;
+		min-width: 0;
+		user-select: text;
 		background: transparent;
 		border: 1px solid var(--accent);
 		border-radius: 4px;
